@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node .vscode-rewind/rewind-cli.cjs hook --reason session-start"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "node .vscode-rewind/rewind-cli.cjs hook --reason before-user-prompt"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "node .vscode-rewind/rewind-cli.cjs hook --reason before-tool-use"
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node .vscode-rewind/rewind-cli.cjs hook --reason session-stop"
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "maxStorageBytes": 524288000,
+  "maxCheckpoints": 100,
+  "maxFileBytes": 52428800,
+  "maxDiffBytes": 1048576,
+  "checkpointAllPreToolUse": true,
+  "ignore": [
+    ".git/**",
+    ".rewind/**",
+    ".vscode-rewind/**",
+    "node_modules/**",
+    "dist/**",
+    "out/**",
+    "build/**",
+    "coverage/**",
+    ".next/**",
+    ".turbo/**",
+    "*.log"
+  ]
+}

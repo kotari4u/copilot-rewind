@@ -1,0 +1,172 @@
+{
+  "name": "copilot-rewind",
+  "displayName": "Copilot Rewind",
+  "description": "Programmable non-Git workspace checkpoints and rewind tools for Copilot Chat.",
+  "version": "0.0.1",
+  "publisher": "local-dev",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onChatParticipant:rewind.chat",
+    "onLanguageModelTool:rewind_create_checkpoint",
+    "onLanguageModelTool:rewind_list_checkpoints",
+    "onLanguageModelTool:rewind_diff_checkpoint",
+    "onLanguageModelTool:rewind_restore_checkpoint"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rewind.installWorkspaceFiles",
+        "title": "Rewind: Install Workspace Hook Files"
+      },
+      {
+        "command": "rewind.createCheckpoint",
+        "title": "Rewind: Create Checkpoint"
+      },
+      {
+        "command": "rewind.listCheckpoints",
+        "title": "Rewind: List Checkpoints"
+      },
+      {
+        "command": "rewind.diffCheckpoint",
+        "title": "Rewind: Diff Checkpoint"
+      },
+      {
+        "command": "rewind.restoreCheckpoint",
+        "title": "Rewind: Restore Checkpoint"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "rewind.chat",
+        "name": "rewind",
+        "fullName": "Rewind",
+        "description": "Create, inspect, diff, and restore non-Git workspace checkpoints.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "checkpoint",
+            "description": "Create a checkpoint of the current workspace."
+          },
+          {
+            "name": "list",
+            "description": "List available checkpoints."
+          },
+          {
+            "name": "diff",
+            "description": "Show the diff between a checkpoint and the current workspace."
+          },
+          {
+            "name": "rewind",
+            "description": "Restore a checkpoint by id. Add --dry-run to preview."
+          }
+        ]
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "rewind_create_checkpoint",
+        "tags": [
+          "rewind",
+          "checkpoint"
+        ],
+        "toolReferenceName": "rewindCreateCheckpoint",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Create Rewind Checkpoint",
+        "modelDescription": "Create a non-Git snapshot checkpoint of the current workspace files.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "description": "Human-readable reason for creating this checkpoint."
+            }
+          }
+        }
+      },
+      {
+        "name": "rewind_list_checkpoints",
+        "tags": [
+          "rewind",
+          "checkpoint"
+        ],
+        "toolReferenceName": "rewindListCheckpoints",
+        "canBeReferencedInPrompt": true,
+        "displayName": "List Rewind Checkpoints",
+        "modelDescription": "List available non-Git rewind checkpoints.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "rewind_diff_checkpoint",
+        "tags": [
+          "rewind",
+          "diff"
+        ],
+        "toolReferenceName": "rewindDiffCheckpoint",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Diff Rewind Checkpoint",
+        "modelDescription": "Show changes between a checkpoint id and the current workspace.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Checkpoint id to diff against."
+            }
+          }
+        }
+      },
+      {
+        "name": "rewind_restore_checkpoint",
+        "tags": [
+          "rewind",
+          "restore"
+        ],
+        "toolReferenceName": "rewindRestoreCheckpoint",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Restore Rewind Checkpoint",
+        "modelDescription": "Restore a checkpoint id to the workspace. Creates a safety checkpoint first unless dryRun is true.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Checkpoint id to restore."
+            },
+            "dryRun": {
+              "type": "boolean",
+              "description": "Preview the restore without writing or deleting files."
+            }
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/vscode": "^1.100.0",
+    "typescript": "^5.8.0"
+  }
+}
