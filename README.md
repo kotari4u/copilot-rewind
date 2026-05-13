@@ -2,9 +2,34 @@
 
 Programmable non-Git workspace checkpoints and rewind tools for GitHub Copilot in VS Code.
 
-## How to run this extension locally
+## What this provides
 
-This repo is extension source code. It will not appear in the VS Code Extensions sidebar until you either run it in an Extension Development Host or package and install it.
+- VS Code commands for checkpoint, list, diff, and restore.
+- A Copilot Chat participant named `@rewind`.
+- Agent tools named `rewindCreateCheckpoint`, `rewindListCheckpoints`, `rewindDiffCheckpoint`, and `rewindRestoreCheckpoint`.
+- Copilot lifecycle hooks that create checkpoints on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `Stop`.
+- A non-Git checkpoint engine under `.vscode-rewind/`.
+
+## Implemented safety features
+
+- Confirmation before real rewind.
+- Automatic safety checkpoint before every real rewind.
+- Workspace path validation to block `../` and absolute-path writes.
+- Ignore rules for `.git`, `.rewind`, `node_modules`, `dist`, `out`, `build`, and similar generated folders.
+- Max checkpoint/storage pruning.
+- Binary file storage and binary diff reporting.
+- Dry-run mode.
+- Clear restored/deleted/unchanged report.
+
+## Important: source repo vs installed extension
+
+Opening this repo in VS Code does not install the extension.
+
+The Extensions sidebar searches installed extensions and the marketplace. This source repo will not appear there just because `npm install` or `npm run compile` succeeded.
+
+To run this extension locally, launch it in an Extension Development Host.
+
+## Run the extension locally
 
 ### 1. Open this repo in VS Code
 
@@ -31,7 +56,7 @@ Choose:
 Run Copilot Rewind Extension
 ```
 
-Then click the green play button.
+Click the green play button.
 
 VS Code opens a second window titled something like:
 
@@ -41,7 +66,7 @@ VS Code opens a second window titled something like:
 
 That second window is where the extension is running.
 
-## How to verify it loaded
+## Verify the extension loaded
 
 In the Extension Development Host window, open Command Palette:
 
@@ -67,12 +92,12 @@ Rewind: Restore Checkpoint
 
 If you search in the original VS Code window, you will not see these commands. They appear in the Extension Development Host window.
 
-## How to install hooks into a workspace
+## Install hooks into a workspace
 
 In the Extension Development Host window:
 
 1. Open the project folder you want Copilot to edit.
-2. Run:
+2. Run this command from Command Palette:
 
 ```text
 Rewind: Install Workspace Hook Files
@@ -86,9 +111,11 @@ This creates:
 .vscode-rewind/rewind-core.cjs
 ```
 
-## How to use the commands
+Do not copy `.rewind/`; that is runtime checkpoint data.
 
-Command Palette commands:
+## Use the commands
+
+Command Palette:
 
 ```text
 Rewind: Create Checkpoint
@@ -97,7 +124,7 @@ Rewind: Diff Checkpoint
 Rewind: Restore Checkpoint
 ```
 
-Copilot Chat participant commands:
+Copilot Chat participant:
 
 ```text
 @rewind /checkpoint before changes
@@ -107,16 +134,16 @@ Copilot Chat participant commands:
 @rewind /rewind cp_...
 ```
 
-Agent tools:
+Copilot Agent tools:
 
 ```text
-rewindCreateCheckpoint
-rewindListCheckpoints
-rewindDiffCheckpoint
-rewindRestoreCheckpoint
+#rewindCreateCheckpoint
+#rewindListCheckpoints
+#rewindDiffCheckpoint
+#rewindRestoreCheckpoint
 ```
 
-## How to verify hooks are triggering
+## Verify hooks are triggering
 
 Open:
 
@@ -130,7 +157,9 @@ Choose:
 GitHub Copilot Chat Hooks
 ```
 
-Then ask Copilot Agent mode to edit a file. Checkpoints should appear in:
+Then ask Copilot Agent mode to edit a file.
+
+Checkpoints should appear in:
 
 ```text
 .rewind/checkpoints/
@@ -140,4 +169,24 @@ You can also run:
 
 ```text
 Rewind: List Checkpoints
+```
+
+The checkpoint reasons should include values like:
+
+```text
+before-user-prompt:UserPromptSubmit
+before-tool-use:PreToolUse
+session-start:SessionStart
+session-stop:Stop
+```
+
+## Manual CLI test
+
+From any workspace where `.vscode-rewind/` exists:
+
+```bash
+node .vscode-rewind/rewind-cli.cjs checkpoint --reason manual-test
+node .vscode-rewind/rewind-cli.cjs list
+node .vscode-rewind/rewind-cli.cjs diff <checkpoint-id>
+node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --dry-run
 ```
