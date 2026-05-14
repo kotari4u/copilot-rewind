@@ -113,6 +113,55 @@ test('delta rewind deletes files created in the checkpoint window and preserves 
   assert.equal(await readFile(workspace, 'created-later.txt'), 'later\n');
 });
 
+test('delta rewind removes nested files created in the checkpoint window and cleans empty directories', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'base.txt', 'base\n');
+  const cp1 = await checkpoint(workspace, 'before-agent');
+
+  await writeFile(workspace, 'features/new/created-by-agent.ts', 'export const value = 1;\n');
+  await checkpoint(workspace, 'after-agent');
+
+  const result = await rewindToCheckpoint(workspace, cp1.id);
+
+  assert.deepEqual(result.report.deleted, ['features/new/created-by-agent.ts']);
+  assert.equal(await exists(path.join(workspace, 'features/new/created-by-agent.ts')), false);
+  assert.equal(await exists(path.join(workspace, 'features/new')), false);
+  assert.equal(await exists(path.join(workspace, 'features')), false);
+});
+
+test('delta rewind does not delete a created file that was edited after the checkpoint window', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'base.txt', 'base\n');
+  const cp1 = await checkpoint(workspace, 'before-agent');
+
+  await writeFile(workspace, 'created-by-agent.txt', 'agent version\n');
+  await checkpoint(workspace, 'after-agent');
+
+  await writeFile(workspace, 'created-by-agent.txt', 'later user version\n');
+  const result = await rewindToCheckpoint(workspace, cp1.id, { dryRun: true });
+
+  assert.deepEqual(result.report.deleted, []);
+  assert.equal(result.report.skipped.length, 1);
+  assert.match(result.report.skipped[0], /created-by-agent\.txt changed after checkpoint window/);
+  assert.equal(await readFile(workspace, 'created-by-agent.txt'), 'later user version\n');
+});
+
+test('delta rewind treats already-deleted agent-created files as newer delete edits and leaves them missing', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'base.txt', 'base\n');
+  const cp1 = await checkpoint(workspace, 'before-agent');
+
+  await writeFile(workspace, 'created-by-agent.txt', 'agent version\n');
+  await checkpoint(workspace, 'after-agent');
+
+  await fs.rm(path.join(workspace, 'created-by-agent.txt'));
+  const result = await rewindToCheckpoint(workspace, cp1.id);
+
+  assert.deepEqual(result.report.deleted, []);
+  assert.equal(result.report.skipped.length, 1);
+  assert.equal(await exists(path.join(workspace, 'created-by-agent.txt')), false);
+});
+
 test('delta rewind restores files deleted in the checkpoint window', async () => {
   const workspace = await makeWorkspace();
   await writeFile(workspace, 'deleted-by-agent.txt', 'bring me back\n');
@@ -126,6 +175,77 @@ test('delta rewind restores files deleted in the checkpoint window', async () =>
 
   assert.deepEqual(result.report.restored, ['deleted-by-agent.txt']);
   assert.equal(await readFile(workspace, 'deleted-by-agent.txt'), 'bring me back\n');
+});
+
+test('delta rewind restores nested files deleted in the checkpoint window and recreates directories', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'src/removed/deleted-by-agent.ts', 'export const removed = true;\n');
+  await writeFile(workspace, 'base.txt', 'base\n');
+  const cp1 = await checkpoint(workspace, 'before-agent');
+
+  await fs.rm(path.join(workspace, 'src/removed/deleted-by-agent.ts'));
+  await fs.rmdir(path.join(workspace, 'src/removed'));
+  await checkpoint(workspace, 'after-agent');
+
+  const result = await rewindToCheckpoint(workspace, cp1.id);
+
+  assert.deepEqual(result.report.restored, ['src/removed/deleted-by-agent.ts']);
+  assert.equal(await readFile(workspace, 'src/removed/deleted-by-agent.ts'), 'export const removed = true;\n');
+});
+
+test('delta rewind does not overwrite a deleted file that was recreated after the checkpoint window', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'deleted-by-agent.txt', 'original content\n');
+  await writeFile(workspace, 'base.txt', 'base\n');
+  const cp1 = await checkpoint(workspace, 'before-agent');
+
+  await fs.rm(path.join(workspace, 'deleted-by-agent.txt'));
+  await checkpoint(workspace, 'after-agent');
+
+  await writeFile(workspace, 'deleted-by-agent.txt', 'later recreated content\n');
+  const result = await rewindToCheckpoint(workspace, cp1.id);
+
+  assert.deepEqual(result.report.restored, []);
+  assert.equal(result.report.skipped.length, 1);
+  assert.match(result.report.skipped[0], /preserve newer create\/delete edit/);
+  assert.equal(await readFile(workspace, 'deleted-by-agent.txt'), 'later recreated content\n');
+});
+
+test('dry-run delta rewind reports created/deleted file actions without mutating files', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'deleted-by-agent.txt', 'restore me\n');
+  await writeFile(workspace, 'base.txt', 'base\n');
+  const cp1 = await checkpoint(workspace, 'before-agent');
+
+  await fs.rm(path.join(workspace, 'deleted-by-agent.txt'));
+  await writeFile(workspace, 'created-by-agent.txt', 'delete me\n');
+  await checkpoint(workspace, 'after-agent');
+
+  const result = await rewindToCheckpoint(workspace, cp1.id, { dryRun: true });
+
+  assert.deepEqual(result.report.restored, ['deleted-by-agent.txt']);
+  assert.deepEqual(result.report.deleted, ['created-by-agent.txt']);
+  assert.equal(await exists(path.join(workspace, 'deleted-by-agent.txt')), false);
+  assert.equal(await readFile(workspace, 'created-by-agent.txt'), 'delete me\n');
+});
+
+test('diff reports added and deleted files clearly', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'deleted.txt', 'old content\n');
+  await writeFile(workspace, 'base.txt', 'base\n');
+  const cp1 = await checkpoint(workspace, 'before');
+
+  await fs.rm(path.join(workspace, 'deleted.txt'));
+  await writeFile(workspace, 'added.txt', 'new content\n');
+
+  const result = await diffCheckpoint(workspace, cp1.id);
+
+  assert.match(result.text, /^--- \/dev\/null$/m);
+  assert.match(result.text, /^\+\+\+ workspace\/added\.txt$/m);
+  assert.match(result.text, /^\+new content$/m);
+  assert.match(result.text, /^--- checkpoint\/deleted\.txt$/m);
+  assert.match(result.text, /^\+\+\+ \/dev\/null$/m);
+  assert.match(result.text, /^-old content$/m);
 });
 
 test('full restore still restores the entire checkpoint snapshot', async () => {
