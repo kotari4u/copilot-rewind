@@ -48,6 +48,25 @@ To preview the delta:
 @rewind /rewind cp_123 --dry-run
 ```
 
+To undo the change that produced a checkpoint, use `--change`.
+
+For example, if your checkpoint list has:
+
+```text
+classes-created
+print-added
+print1-added
+print2-added
+```
+
+and you want to remove the `print1-added` change while keeping `print2-added`, run:
+
+```text
+@rewind /rewind <print1-added-checkpoint-id> --change
+```
+
+Without `--change`, Rewind treats the selected checkpoint as the start of the window and undoes changes after it. With `--change`, Rewind treats the selected checkpoint as the end of the window and undoes the change that produced it.
+
 To force the older behavior and restore the entire workspace snapshot:
 
 ```text
@@ -167,6 +186,7 @@ Copilot Chat participant:
 @rewind /diff cp_...
 @rewind /rewind cp_... --dry-run
 @rewind /rewind cp_...
+@rewind /rewind cp_... --change
 @rewind /rewind cp_... --full
 ```
 
@@ -226,5 +246,6 @@ node .vscode-rewind/rewind-cli.cjs list
 node .vscode-rewind/rewind-cli.cjs diff <checkpoint-id>
 node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --dry-run
 node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id>
+node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --change
 node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --full
 ```

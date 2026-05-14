@@ -169,6 +169,7 @@ async function rewindToCheckpoint(root, id, options = {}) {
   const report = {
     checkpointId: id,
     mode: options.fullRestore ? 'full' : 'delta',
+    windowStartCheckpointId: undefined,
     windowEndCheckpointId: undefined,
     safetyCheckpointId: undefined,
     dryRun: Boolean(options.dryRun),
@@ -188,7 +189,11 @@ async function rewindToCheckpoint(root, id, options = {}) {
   }
 
   if (!options.fullRestore) {
-    await rewindCheckpointDelta(root, config, checkpoint, report, options);
+    if (options.changeCheckpoint) {
+      await rewindCheckpointChange(root, config, checkpoint, report, options);
+    } else {
+      await rewindCheckpointDelta(root, config, checkpoint, report, options);
+    }
     if (!options.dryRun) {
       await enforceStorageLimit(root, config, new Set([id, report.safetyCheckpointId].filter(Boolean)));
     }
@@ -258,17 +263,31 @@ async function rewindFullSnapshot(root, config, checkpoint, report, options) {
 
 async function rewindCheckpointDelta(root, config, checkpoint, report, options) {
   const nextCheckpoint = await getNextCheckpoint(root, checkpoint);
-  report.windowEndCheckpointId = nextCheckpoint?.id ?? 'current-workspace';
+  await rewindCheckpointDeltaWindow(root, config, checkpoint, nextCheckpoint, report, options);
+}
 
-  const baseByPath = filesByPath(checkpoint.files);
-  const afterByPath = nextCheckpoint
-    ? filesByPath(nextCheckpoint.files)
+async function rewindCheckpointChange(root, config, checkpoint, report, options) {
+  const previousCheckpoint = await getPreviousCheckpoint(root, checkpoint);
+  if (!previousCheckpoint) {
+    report.errors.push(`Checkpoint ${checkpoint.id} has no previous checkpoint to use as the change window start.`);
+    return;
+  }
+  await rewindCheckpointDeltaWindow(root, config, previousCheckpoint, checkpoint, report, options);
+}
+
+async function rewindCheckpointDeltaWindow(root, config, baseCheckpoint, afterCheckpoint, report, options) {
+  report.windowStartCheckpointId = baseCheckpoint.id;
+  report.windowEndCheckpointId = afterCheckpoint?.id ?? 'current-workspace';
+
+  const baseByPath = filesByPath(baseCheckpoint.files);
+  const afterByPath = afterCheckpoint
+    ? filesByPath(afterCheckpoint.files)
     : await currentFilesByPath(root, config);
   const currentByPath = await currentFilesByPath(root, config);
   const changedPaths = changedPathsBetween(baseByPath, afterByPath);
 
   if (!changedPaths.length) {
-    report.skipped.push(`No changed paths found for checkpoint window ${checkpoint.id} -> ${report.windowEndCheckpointId}.`);
+    report.skipped.push(`No changed paths found for checkpoint window ${report.windowStartCheckpointId} -> ${report.windowEndCheckpointId}.`);
     return;
   }
 
@@ -279,7 +298,7 @@ async function rewindCheckpointDelta(root, config, checkpoint, report, options) 
       const afterFile = afterByPath.get(relPath);
       const currentFile = currentByPath.get(relPath);
 
-      if (nextCheckpoint && !sameFileState(currentFile, afterFile)) {
+      if (afterCheckpoint && !sameFileState(currentFile, afterFile)) {
         const patched = await tryReversePatchChangedFile(root, config, relPath, baseFile, afterFile, currentFile);
         if (!patched.ok) {
           report.skipped.push(`${relPath} changed after checkpoint window; ${patched.reason}`);
@@ -528,6 +547,17 @@ async function getNextCheckpoint(root, checkpoint) {
     return undefined;
   }
   return readJson(checkpointPath(root, newer[0].id));
+}
+
+async function getPreviousCheckpoint(root, checkpoint) {
+  const checkpoints = await listCheckpoints(root);
+  const older = checkpoints
+    .filter(item => item.createdAt < checkpoint.createdAt)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  if (!older.length) {
+    return undefined;
+  }
+  return readJson(checkpointPath(root, older[0].id));
 }
 
 function filesByPath(files) {

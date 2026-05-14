@@ -15,6 +15,7 @@ type CliResult = {
   report?: {
     checkpointId?: string;
     mode?: string;
+    windowStartCheckpointId?: string;
     windowEndCheckpointId?: string;
     safetyCheckpointId?: string;
     dryRun?: boolean;
@@ -138,9 +139,9 @@ async function restoreCheckpointCommand(context: vscode.ExtensionContext) {
   if (!id) {
     return;
   }
-  const action = await vscode.window.showQuickPick(['Dry run preview', 'Undo checkpoint changes', 'Full snapshot restore'], {
+  const action = await vscode.window.showQuickPick(['Dry run preview', 'Undo changes after this checkpoint', 'Undo change that produced this checkpoint', 'Full snapshot restore'], {
     title: `Rewind ${id}`,
-    placeHolder: 'Choose whether to preview, undo only checkpoint changes, or restore the full snapshot'
+    placeHolder: 'Choose whether to preview, undo a window, undo the selected change, or restore the full snapshot'
   });
   if (!action) {
     return;
@@ -157,6 +158,9 @@ async function restoreCheckpointCommand(context: vscode.ExtensionContext) {
   }
   if (action === 'Full snapshot restore') {
     args.push('--full');
+  }
+  if (action === 'Undo change that produced this checkpoint') {
+    args.push('--change');
   }
   const result = await runCli(context, args);
   await showReport(result);
@@ -204,9 +208,9 @@ function createChatHandler(context: vscode.ExtensionContext): vscode.ChatRequest
       }
 
       if (request.command === 'rewind') {
-        const { id, dryRun, fullRestore } = parseRewindPrompt(request.prompt);
+        const { id, dryRun, fullRestore, changeCheckpoint } = parseRewindPrompt(request.prompt);
         if (!id) {
-          stream.markdown('Usage: `@rewind /rewind <checkpoint-id> [--dry-run] [--full]`');
+          stream.markdown('Usage: `@rewind /rewind <checkpoint-id> [--dry-run] [--change] [--full]`');
           return {};
         }
         if (!dryRun && !(await confirmRewind(id))) {
@@ -220,12 +224,15 @@ function createChatHandler(context: vscode.ExtensionContext): vscode.ChatRequest
         if (fullRestore) {
           args.push('--full');
         }
+        if (changeCheckpoint) {
+          args.push('--change');
+        }
         const result = await runCli(context, args);
         stream.markdown(formatReport(result));
         return {};
       }
 
-      stream.markdown('Use `/checkpoint`, `/list`, `/diff <id>`, or `/rewind <id> [--dry-run] [--full]`.');
+      stream.markdown('Use `/checkpoint`, `/list`, `/diff <id>`, or `/rewind <id> [--dry-run] [--change] [--full]`.');
       return {};
     } catch (error) {
       stream.markdown(`Rewind failed: \`${error instanceof Error ? error.message : String(error)}\``);
@@ -234,12 +241,13 @@ function createChatHandler(context: vscode.ExtensionContext): vscode.ChatRequest
   };
 }
 
-function parseRewindPrompt(prompt: string): { id?: string; dryRun: boolean; fullRestore: boolean } {
+function parseRewindPrompt(prompt: string): { id?: string; dryRun: boolean; fullRestore: boolean; changeCheckpoint: boolean } {
   const tokens = prompt.trim().split(/\s+/).filter(Boolean);
   return {
     id: tokens.find(token => !token.startsWith('--')),
     dryRun: tokens.includes('--dry-run'),
-    fullRestore: tokens.includes('--full')
+    fullRestore: tokens.includes('--full'),
+    changeCheckpoint: tokens.includes('--change')
   };
 }
 
@@ -284,6 +292,9 @@ function formatReport(result: CliResult): string {
     `Mode: \`${report.mode ?? 'delta'}\``
   ];
   if (report.windowEndCheckpointId) {
+    if (report.windowStartCheckpointId) {
+      lines.push(`Window start: \`${report.windowStartCheckpointId}\``);
+    }
     lines.push(`Window end: \`${report.windowEndCheckpointId}\``);
   }
   if (report.safetyCheckpointId) {
@@ -340,10 +351,10 @@ class DiffCheckpointTool implements vscode.LanguageModelTool<{ id: string }> {
   }
 }
 
-class RestoreCheckpointTool implements vscode.LanguageModelTool<{ id: string; dryRun?: boolean; fullRestore?: boolean }> {
+class RestoreCheckpointTool implements vscode.LanguageModelTool<{ id: string; dryRun?: boolean; fullRestore?: boolean; changeCheckpoint?: boolean }> {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
-  async prepareInvocation(options: vscode.LanguageModelToolInvocationPrepareOptions<{ id: string; dryRun?: boolean; fullRestore?: boolean }>) {
+  async prepareInvocation(options: vscode.LanguageModelToolInvocationPrepareOptions<{ id: string; dryRun?: boolean; fullRestore?: boolean; changeCheckpoint?: boolean }>) {
     return {
       invocationMessage: options.input.dryRun ? `Previewing rewind to ${options.input.id}` : `Rewinding workspace to ${options.input.id}`,
       confirmationMessages: options.input.dryRun ? undefined : {
@@ -353,7 +364,7 @@ class RestoreCheckpointTool implements vscode.LanguageModelTool<{ id: string; dr
     };
   }
 
-  async invoke(options: vscode.LanguageModelToolInvocationOptions<{ id: string; dryRun?: boolean; fullRestore?: boolean }>) {
+  async invoke(options: vscode.LanguageModelToolInvocationOptions<{ id: string; dryRun?: boolean; fullRestore?: boolean; changeCheckpoint?: boolean }>) {
     if (!options.input.dryRun && !(await confirmRewind(options.input.id))) {
       return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Rewind cancelled by user.')]);
     }
@@ -363,6 +374,9 @@ class RestoreCheckpointTool implements vscode.LanguageModelTool<{ id: string; dr
     }
     if (options.input.fullRestore) {
       args.push('--full');
+    }
+    if (options.input.changeCheckpoint) {
+      args.push('--change');
     }
     const result = await runCli(this.context, args);
     return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(formatReport(result))]);

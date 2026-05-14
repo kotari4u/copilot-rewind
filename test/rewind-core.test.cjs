@@ -97,6 +97,55 @@ test('delta rewind skips overlapping newer edits on the same lines', async () =>
   assert.equal(await readFile(workspace, 'app.txt'), lines('a', 'user-overlap', 'c'));
 });
 
+test('delta rewind removes middle Java method additions across two files while preserving later methods', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', []));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', []));
+  await checkpoint(workspace, 'classes-created');
+
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', ['print']));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', ['print']));
+  const beforePrint1 = await checkpoint(workspace, 'print-added');
+
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', ['print', 'print1']));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', ['print', 'print1']));
+  await checkpoint(workspace, 'print1-added');
+
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', ['print', 'print1', 'print2']));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', ['print', 'print1', 'print2']));
+  const result = await rewindToCheckpoint(workspace, beforePrint1.id);
+
+  assert.deepEqual(result.report.restored, ['src/Addition.java (patched)', 'src/Multiply.java (patched)']);
+  assert.deepEqual(result.report.skipped, []);
+  assert.equal(await readFile(workspace, 'src/Addition.java'), javaClass('Addition', ['print', 'print2']));
+  assert.equal(await readFile(workspace, 'src/Multiply.java'), javaClass('Multiply', ['print', 'print2']));
+});
+
+test('change rewind removes the selected Java checkpoint change across two files', async () => {
+  const workspace = await makeWorkspace();
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', []));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', []));
+  await checkpoint(workspace, 'classes-created');
+
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', ['print']));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', ['print']));
+  await checkpoint(workspace, 'print-added');
+
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', ['print', 'print1']));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', ['print', 'print1']));
+  const print1Checkpoint = await checkpoint(workspace, 'print1-added');
+
+  await writeFile(workspace, 'src/Addition.java', javaClass('Addition', ['print', 'print1', 'print2']));
+  await writeFile(workspace, 'src/Multiply.java', javaClass('Multiply', ['print', 'print1', 'print2']));
+  const result = await rewindToCheckpoint(workspace, print1Checkpoint.id, { changeCheckpoint: true });
+
+  assert.equal(result.report.windowEndCheckpointId, print1Checkpoint.id);
+  assert.deepEqual(result.report.restored, ['src/Addition.java (patched)', 'src/Multiply.java (patched)']);
+  assert.deepEqual(result.report.skipped, []);
+  assert.equal(await readFile(workspace, 'src/Addition.java'), javaClass('Addition', ['print', 'print2']));
+  assert.equal(await readFile(workspace, 'src/Multiply.java'), javaClass('Multiply', ['print', 'print2']));
+});
+
 test('delta rewind deletes files created in the checkpoint window and preserves later unrelated files', async () => {
   const workspace = await makeWorkspace();
   await writeFile(workspace, 'base.txt', 'base\n');
@@ -399,6 +448,28 @@ test('CLI dry-run rewind reports JSON and does not mutate the workspace', async 
   assert.equal(await readFile(workspace, 'file.txt'), 'after\n');
 });
 
+test('CLI change rewind can undo the selected checkpoint change', async () => {
+  const workspace = await makeWorkspace();
+  await fs.mkdir(path.join(workspace, '.vscode-rewind'), { recursive: true });
+  await fs.copyFile(path.join(__dirname, '..', '.vscode-rewind', 'rewind-cli.cjs'), path.join(workspace, '.vscode-rewind', 'rewind-cli.cjs'));
+  await fs.copyFile(path.join(__dirname, '..', '.vscode-rewind', 'rewind-core.cjs'), path.join(workspace, '.vscode-rewind', 'rewind-core.cjs'));
+
+  await writeFile(workspace, 'Addition.java', javaClass('Addition', ['print']));
+  await checkpoint(workspace, 'print');
+  await writeFile(workspace, 'Addition.java', javaClass('Addition', ['print', 'print1']));
+  const print1 = await checkpoint(workspace, 'print1');
+  await writeFile(workspace, 'Addition.java', javaClass('Addition', ['print', 'print1', 'print2']));
+
+  const result = await execFileAsync(process.execPath, ['.vscode-rewind/rewind-cli.cjs', 'rewind', print1.id, '--change', '--json'], {
+    cwd: workspace
+  });
+  const parsed = JSON.parse(result.stdout);
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.report.windowEndCheckpointId, print1.id);
+  assert.equal(await readFile(workspace, 'Addition.java'), javaClass('Addition', ['print', 'print2']));
+});
+
 async function makeWorkspace() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'copilot-rewind-test-'));
 }
@@ -439,6 +510,19 @@ function lines(...items) {
 
 function numberedLines(count) {
   return lines(...Array.from({ length: count }, (_, index) => `line ${index + 1}`));
+}
+
+function javaClass(className, methods) {
+  const methodText = methods
+    .map(method => [
+      `    public void ${method}() {`,
+      `        System.out.println("${className}.${method}");`,
+      '    }'
+    ].join('\n'))
+    .join('\n\n');
+  return methodText
+    ? `public class ${className} {\n${methodText}\n}\n`
+    : `public class ${className} {\n}\n`;
 }
 
 function delay(ms) {

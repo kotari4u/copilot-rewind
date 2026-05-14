@@ -29,6 +29,7 @@ async function main() {
         '  node .vscode-rewind/rewind-cli.cjs list',
         '  node .vscode-rewind/rewind-cli.cjs diff <checkpoint-id>',
         '  node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> [--dry-run]',
+        '  node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --change [--dry-run]',
         '  node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --full [--dry-run]',
         '  node .vscode-rewind/rewind-cli.cjs hook --reason before-tool-use'
       ].join('\n')
@@ -80,11 +81,12 @@ async function main() {
   if (command === 'rewind') {
     const id = args.shift();
     if (!id) {
-      throw new Error('Missing checkpoint id. Usage: rewind <checkpoint-id> [--dry-run] [--full]');
+      throw new Error('Missing checkpoint id. Usage: rewind <checkpoint-id> [--dry-run] [--change] [--full]');
     }
     const dryRun = takeFlag(args, '--dry-run');
     const fullRestore = takeFlag(args, '--full');
-    const result = await rewindToCheckpoint(root, id, { dryRun, fullRestore });
+    const changeCheckpoint = takeFlag(args, '--change');
+    const result = await rewindToCheckpoint(root, id, { dryRun, fullRestore, changeCheckpoint });
     output(json, result);
     return;
   }

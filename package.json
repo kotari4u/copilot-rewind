@@ -66,7 +66,7 @@
           },
           {
             "name": "rewind",
-            "description": "Undo a checkpoint change window by id. Add --dry-run to preview or --full for full snapshot restore."
+            "description": "Undo a checkpoint window by id. Add --change to undo the change that produced the checkpoint, --dry-run to preview, or --full for full snapshot restore."
           }
         ]
       }
@@ -157,6 +157,10 @@
             "fullRestore": {
               "type": "boolean",
               "description": "Restore the full workspace snapshot instead of only undoing the checkpoint change window."
+            },
+            "changeCheckpoint": {
+              "type": "boolean",
+              "description": "Undo the change window that ends at this checkpoint instead of the window that starts at this checkpoint."
             }
           }
         }
