@@ -21,6 +21,38 @@ Programmable non-Git workspace checkpoints and rewind tools for GitHub Copilot i
 - Dry-run mode.
 - Clear restored/deleted/unchanged report.
 
+## Rewind behavior
+
+By default, rewind is a delta operation.
+
+When you run:
+
+```text
+@rewind /rewind cp_123
+```
+
+Rewind treats `cp_123` as the beginning of a change window. It compares that checkpoint to the next checkpoint, then only undoes files that changed in that window.
+
+This means:
+
+- Files modified during that checkpoint window are restored.
+- Files created during that checkpoint window are deleted.
+- Files deleted during that checkpoint window are restored.
+- Later unrelated changes are left alone.
+- If a file changed during the checkpoint window and was edited again later, Rewind skips it to preserve the newer edit.
+
+To preview the delta:
+
+```text
+@rewind /rewind cp_123 --dry-run
+```
+
+To force the older behavior and restore the entire workspace snapshot:
+
+```text
+@rewind /rewind cp_123 --full
+```
+
 ## Important: source repo vs installed extension
 
 Opening this repo in VS Code does not install the extension.
@@ -132,6 +164,7 @@ Copilot Chat participant:
 @rewind /diff cp_...
 @rewind /rewind cp_... --dry-run
 @rewind /rewind cp_...
+@rewind /rewind cp_... --full
 ```
 
 Copilot Agent tools:
@@ -189,4 +222,6 @@ node .vscode-rewind/rewind-cli.cjs checkpoint --reason manual-test
 node .vscode-rewind/rewind-cli.cjs list
 node .vscode-rewind/rewind-cli.cjs diff <checkpoint-id>
 node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --dry-run
+node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id>
+node .vscode-rewind/rewind-cli.cjs rewind <checkpoint-id> --full
 ```

@@ -167,6 +167,8 @@ async function rewindToCheckpoint(root, id, options = {}) {
   const checkpoint = await loadCheckpoint(root, id);
   const report = {
     checkpointId: id,
+    mode: options.fullRestore ? 'full' : 'delta',
+    windowEndCheckpointId: undefined,
     safetyCheckpointId: undefined,
     dryRun: Boolean(options.dryRun),
     restored: [],
@@ -184,6 +186,32 @@ async function rewindToCheckpoint(root, id, options = {}) {
     report.safetyCheckpointId = safety.id;
   }
 
+  if (!options.fullRestore) {
+    await rewindCheckpointDelta(root, config, checkpoint, report, options);
+    if (!options.dryRun) {
+      await enforceStorageLimit(root, config, new Set([id, report.safetyCheckpointId].filter(Boolean)));
+    }
+    return {
+      ok: report.errors.length === 0,
+      message: options.dryRun ? `Delta dry run complete for ${id}.` : `Delta rewind complete for ${id}.`,
+      report
+    };
+  }
+
+  await rewindFullSnapshot(root, config, checkpoint, report, options);
+
+  if (!options.dryRun) {
+    await enforceStorageLimit(root, config, new Set([id, report.safetyCheckpointId].filter(Boolean)));
+  }
+
+  return {
+    ok: report.errors.length === 0,
+    message: options.dryRun ? `Full dry run complete for ${id}.` : `Full rewind complete for ${id}.`,
+    report
+  };
+}
+
+async function rewindFullSnapshot(root, config, checkpoint, report, options) {
   const checkpointByPath = new Map(checkpoint.files.map(file => [file.path, file]));
   const currentFiles = await listWorkspaceFiles(root, config);
   const currentSet = new Set(currentFiles);
@@ -225,16 +253,64 @@ async function rewindToCheckpoint(root, id, options = {}) {
       report.errors.push(`${relPath}: ${error.message}`);
     }
   }
+}
 
-  if (!options.dryRun) {
-    await enforceStorageLimit(root, config, new Set([id, report.safetyCheckpointId].filter(Boolean)));
+async function rewindCheckpointDelta(root, config, checkpoint, report, options) {
+  const nextCheckpoint = await getNextCheckpoint(root, checkpoint);
+  report.windowEndCheckpointId = nextCheckpoint?.id ?? 'current-workspace';
+
+  const baseByPath = filesByPath(checkpoint.files);
+  const afterByPath = nextCheckpoint
+    ? filesByPath(nextCheckpoint.files)
+    : await currentFilesByPath(root, config);
+  const currentByPath = await currentFilesByPath(root, config);
+  const changedPaths = changedPathsBetween(baseByPath, afterByPath);
+
+  if (!changedPaths.length) {
+    report.skipped.push(`No changed paths found for checkpoint window ${checkpoint.id} -> ${report.windowEndCheckpointId}.`);
+    return;
   }
 
-  return {
-    ok: report.errors.length === 0,
-    message: options.dryRun ? `Dry run complete for ${id}.` : `Rewind complete for ${id}.`,
-    report
-  };
+  for (const relPath of changedPaths) {
+    try {
+      validateRelativePath(relPath);
+      const baseFile = baseByPath.get(relPath);
+      const afterFile = afterByPath.get(relPath);
+      const currentFile = currentByPath.get(relPath);
+
+      if (nextCheckpoint && !sameFileState(currentFile, afterFile)) {
+        report.skipped.push(`${relPath} changed after checkpoint window; skipped to preserve newer edits.`);
+        continue;
+      }
+
+      if (!baseFile) {
+        if (!currentFile) {
+          report.unchanged.push(relPath);
+          continue;
+        }
+        report.deleted.push(relPath);
+        if (!options.dryRun) {
+          await fs.rm(resolveWorkspacePath(root, relPath), { force: true });
+          await removeEmptyParents(root, path.dirname(resolveWorkspacePath(root, relPath)));
+        }
+        continue;
+      }
+
+      if (sameFileState(currentFile, baseFile)) {
+        report.unchanged.push(relPath);
+        continue;
+      }
+
+      report.restored.push(relPath);
+      if (!options.dryRun) {
+        const targetPath = resolveWorkspacePath(root, relPath);
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.writeFile(targetPath, await readBlob(root, baseFile.blob));
+      }
+    } catch (error) {
+      report.errors.push(`${relPath}: ${error.message}`);
+    }
+  }
 }
 
 async function loadHookInput(stream) {
@@ -399,6 +475,53 @@ async function getLatestCheckpoint(root) {
     return undefined;
   }
   return readJson(checkpointPath(root, checkpoints[0].id));
+}
+
+async function getNextCheckpoint(root, checkpoint) {
+  const checkpoints = await listCheckpoints(root);
+  const newer = checkpoints
+    .filter(item => item.createdAt > checkpoint.createdAt)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  if (!newer.length) {
+    return undefined;
+  }
+  return readJson(checkpointPath(root, newer[0].id));
+}
+
+function filesByPath(files) {
+  return new Map((files || []).map(file => [file.path, file]));
+}
+
+async function currentFilesByPath(root, config) {
+  const current = new Map();
+  for (const relPath of await listWorkspaceFiles(root, config)) {
+    const bytes = await fs.readFile(resolveWorkspacePath(root, relPath));
+    current.set(relPath, {
+      path: relPath,
+      kind: 'file',
+      sha256: hash(bytes),
+      size: bytes.length,
+      binary: isProbablyBinary(bytes)
+    });
+  }
+  return current;
+}
+
+function changedPathsBetween(beforeByPath, afterByPath) {
+  const paths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
+  return [...paths]
+    .filter(relPath => !sameFileState(beforeByPath.get(relPath), afterByPath.get(relPath)))
+    .sort();
+}
+
+function sameFileState(left, right) {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return left.sha256 === right.sha256 && left.size === right.size;
 }
 
 async function enforceStorageLimit(root, config, keepIds = new Set()) {

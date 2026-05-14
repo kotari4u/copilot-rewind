@@ -14,6 +14,8 @@ type CliResult = {
   checkpoints?: Array<{ id: string; createdAt: string; reason?: string; files?: number; sizeBytes?: number }>;
   report?: {
     checkpointId?: string;
+    mode?: string;
+    windowEndCheckpointId?: string;
     safetyCheckpointId?: string;
     dryRun?: boolean;
     restored?: string[];
@@ -136,20 +138,26 @@ async function restoreCheckpointCommand(context: vscode.ExtensionContext) {
   if (!id) {
     return;
   }
-  const dryRun = await vscode.window.showQuickPick(['Dry run preview', 'Restore workspace'], {
+  const action = await vscode.window.showQuickPick(['Dry run preview', 'Undo checkpoint changes', 'Full snapshot restore'], {
     title: `Rewind ${id}`,
-    placeHolder: 'Choose whether to preview or restore'
+    placeHolder: 'Choose whether to preview, undo only checkpoint changes, or restore the full snapshot'
   });
-  if (!dryRun) {
+  if (!action) {
     return;
   }
-  if (dryRun === 'Restore workspace') {
+  if (action !== 'Dry run preview') {
     const confirmed = await confirmRewind(id);
     if (!confirmed) {
       return;
     }
   }
-  const args = dryRun === 'Dry run preview' ? ['rewind', id, '--dry-run'] : ['rewind', id];
+  const args = ['rewind', id];
+  if (action === 'Dry run preview') {
+    args.push('--dry-run');
+  }
+  if (action === 'Full snapshot restore') {
+    args.push('--full');
+  }
   const result = await runCli(context, args);
   await showReport(result);
 }
@@ -196,21 +204,28 @@ function createChatHandler(context: vscode.ExtensionContext): vscode.ChatRequest
       }
 
       if (request.command === 'rewind') {
-        const { id, dryRun } = parseRewindPrompt(request.prompt);
+        const { id, dryRun, fullRestore } = parseRewindPrompt(request.prompt);
         if (!id) {
-          stream.markdown('Usage: `@rewind /rewind <checkpoint-id> [--dry-run]`');
+          stream.markdown('Usage: `@rewind /rewind <checkpoint-id> [--dry-run] [--full]`');
           return {};
         }
         if (!dryRun && !(await confirmRewind(id))) {
           stream.markdown('Rewind cancelled.');
           return {};
         }
-        const result = await runCli(context, dryRun ? ['rewind', id, '--dry-run'] : ['rewind', id]);
+        const args = ['rewind', id];
+        if (dryRun) {
+          args.push('--dry-run');
+        }
+        if (fullRestore) {
+          args.push('--full');
+        }
+        const result = await runCli(context, args);
         stream.markdown(formatReport(result));
         return {};
       }
 
-      stream.markdown('Use `/checkpoint`, `/list`, `/diff <id>`, or `/rewind <id> [--dry-run]`.');
+      stream.markdown('Use `/checkpoint`, `/list`, `/diff <id>`, or `/rewind <id> [--dry-run] [--full]`.');
       return {};
     } catch (error) {
       stream.markdown(`Rewind failed: \`${error instanceof Error ? error.message : String(error)}\``);
@@ -219,11 +234,12 @@ function createChatHandler(context: vscode.ExtensionContext): vscode.ChatRequest
   };
 }
 
-function parseRewindPrompt(prompt: string): { id?: string; dryRun: boolean } {
+function parseRewindPrompt(prompt: string): { id?: string; dryRun: boolean; fullRestore: boolean } {
   const tokens = prompt.trim().split(/\s+/).filter(Boolean);
   return {
     id: tokens.find(token => !token.startsWith('--')),
-    dryRun: tokens.includes('--dry-run')
+    dryRun: tokens.includes('--dry-run'),
+    fullRestore: tokens.includes('--full')
   };
 }
 
@@ -264,8 +280,12 @@ function formatReport(result: CliResult): string {
   const lines = [
     `# Rewind ${report.dryRun ? 'Dry Run' : 'Report'}`,
     '',
-    `Checkpoint: \`${report.checkpointId ?? ''}\``
+    `Checkpoint: \`${report.checkpointId ?? ''}\``,
+    `Mode: \`${report.mode ?? 'delta'}\``
   ];
+  if (report.windowEndCheckpointId) {
+    lines.push(`Window end: \`${report.windowEndCheckpointId}\``);
+  }
   if (report.safetyCheckpointId) {
     lines.push(`Safety checkpoint: \`${report.safetyCheckpointId}\``);
   }
@@ -320,27 +340,31 @@ class DiffCheckpointTool implements vscode.LanguageModelTool<{ id: string }> {
   }
 }
 
-class RestoreCheckpointTool implements vscode.LanguageModelTool<{ id: string; dryRun?: boolean }> {
+class RestoreCheckpointTool implements vscode.LanguageModelTool<{ id: string; dryRun?: boolean; fullRestore?: boolean }> {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
-  async prepareInvocation(options: vscode.LanguageModelToolInvocationPrepareOptions<{ id: string; dryRun?: boolean }>) {
+  async prepareInvocation(options: vscode.LanguageModelToolInvocationPrepareOptions<{ id: string; dryRun?: boolean; fullRestore?: boolean }>) {
     return {
       invocationMessage: options.input.dryRun ? `Previewing rewind to ${options.input.id}` : `Rewinding workspace to ${options.input.id}`,
       confirmationMessages: options.input.dryRun ? undefined : {
         title: 'Restore Rewind Checkpoint',
-        message: new vscode.MarkdownString(`Restore checkpoint \`${options.input.id}\`? A safety checkpoint will be created first.`)
+        message: new vscode.MarkdownString(`Restore checkpoint \`${options.input.id}\`? A safety checkpoint will be created first. Default mode only undoes the checkpoint change window; full restore requires \`fullRestore: true\`.`)
       }
     };
   }
 
-  async invoke(options: vscode.LanguageModelToolInvocationOptions<{ id: string; dryRun?: boolean }>) {
+  async invoke(options: vscode.LanguageModelToolInvocationOptions<{ id: string; dryRun?: boolean; fullRestore?: boolean }>) {
     if (!options.input.dryRun && !(await confirmRewind(options.input.id))) {
       return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Rewind cancelled by user.')]);
     }
-    const result = await runCli(
-      this.context,
-      options.input.dryRun ? ['rewind', options.input.id, '--dry-run'] : ['rewind', options.input.id]
-    );
+    const args = ['rewind', options.input.id];
+    if (options.input.dryRun) {
+      args.push('--dry-run');
+    }
+    if (options.input.fullRestore) {
+      args.push('--full');
+    }
+    const result = await runCli(this.context, args);
     return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(formatReport(result))]);
   }
 }
