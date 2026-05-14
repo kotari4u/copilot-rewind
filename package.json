@@ -165,6 +165,8 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test": "node --test test/*.test.cjs",
+    "verify": "npm run compile && npm test",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
