@@ -39,7 +39,8 @@ This means:
 - Files created during that checkpoint window are deleted.
 - Files deleted during that checkpoint window are restored.
 - Later unrelated changes are left alone.
-- If a file changed during the checkpoint window and was edited again later, Rewind skips it to preserve the newer edit.
+- If the same file was edited again later, Rewind tries a line-based reverse patch. Later edits on different lines are preserved.
+- If later edits overlap the same changed lines, Rewind skips that file instead of guessing.
 
 To preview the delta:
 
@@ -52,6 +53,8 @@ To force the older behavior and restore the entire workspace snapshot:
 ```text
 @rewind /rewind cp_123 --full
 ```
+
+Diff output is hunk-based, similar to `git diff`. It shows changed lines with a few lines of context instead of dumping the whole file.
 
 ## Important: source repo vs installed extension
 

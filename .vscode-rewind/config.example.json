@@ -3,6 +3,7 @@
   "maxCheckpoints": 100,
   "maxFileBytes": 52428800,
   "maxDiffBytes": 1048576,
+  "maxTextDiffLinesProduct": 2000000,
   "checkpointAllPreToolUse": true,
   "ignore": [
     ".git/**",

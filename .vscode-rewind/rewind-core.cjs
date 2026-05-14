@@ -10,6 +10,7 @@ const DEFAULT_CONFIG = {
   maxCheckpoints: 100,
   maxFileBytes: 50 * 1024 * 1024,
   maxDiffBytes: 1024 * 1024,
+  maxTextDiffLinesProduct: 2000000,
   checkpointAllPreToolUse: true,
   ignore: [
     '.git/**',
@@ -279,7 +280,15 @@ async function rewindCheckpointDelta(root, config, checkpoint, report, options) 
       const currentFile = currentByPath.get(relPath);
 
       if (nextCheckpoint && !sameFileState(currentFile, afterFile)) {
-        report.skipped.push(`${relPath} changed after checkpoint window; skipped to preserve newer edits.`);
+        const patched = await tryReversePatchChangedFile(root, config, relPath, baseFile, afterFile, currentFile);
+        if (!patched.ok) {
+          report.skipped.push(`${relPath} changed after checkpoint window; ${patched.reason}`);
+          continue;
+        }
+        report.restored.push(`${relPath} (patched)`);
+        if (!options.dryRun) {
+          await fs.writeFile(resolveWorkspacePath(root, relPath), patched.bytes);
+        }
         continue;
       }
 
@@ -311,6 +320,39 @@ async function rewindCheckpointDelta(root, config, checkpoint, report, options) 
       report.errors.push(`${relPath}: ${error.message}`);
     }
   }
+}
+
+async function tryReversePatchChangedFile(root, config, relPath, baseFile, afterFile, currentFile) {
+  if (!baseFile || !afterFile || !currentFile) {
+    return { ok: false, reason: 'skipped to preserve newer create/delete edit.' };
+  }
+  if (baseFile.binary || afterFile.binary || currentFile.binary) {
+    return { ok: false, reason: 'binary file has newer edits and cannot be line-patched safely.' };
+  }
+
+  const baseBytes = await readBlob(root, baseFile.blob);
+  const afterBytes = await readBlob(root, afterFile.blob);
+  const currentBytes = await fs.readFile(resolveWorkspacePath(root, relPath));
+  if (isProbablyBinary(baseBytes) || isProbablyBinary(afterBytes) || isProbablyBinary(currentBytes)) {
+    return { ok: false, reason: 'binary file has newer edits and cannot be line-patched safely.' };
+  }
+
+  const baseLines = splitLinesForPatch(bytesToText(baseBytes));
+  const afterLines = splitLinesForPatch(bytesToText(afterBytes));
+  const currentLines = splitLinesForPatch(bytesToText(currentBytes));
+  if (baseLines.length * afterLines.length > config.maxTextDiffLinesProduct) {
+    return { ok: false, reason: 'text diff is too large to line-patch safely.' };
+  }
+
+  const patch = applyReverseLinePatch(baseLines, afterLines, currentLines);
+  if (!patch.ok) {
+    return { ok: false, reason: patch.reason };
+  }
+
+  return {
+    ok: true,
+    bytes: Buffer.from(joinPatchLines(patch.lines), 'utf8')
+  };
 }
 
 async function loadHookInput(stream) {
@@ -604,44 +646,291 @@ function renderAddedDiff(relPath, currentBytes, config) {
   if (isProbablyBinary(currentBytes)) {
     return `Binary file added: ${relPath} (${currentBytes.length} bytes)`;
   }
-  return unifiedWholeFileDiff(`/dev/null`, `workspace/${relPath}`, '', bytesToText(currentBytes), config);
+  return unifiedLineDiff(`/dev/null`, `workspace/${relPath}`, '', bytesToText(currentBytes), config);
 }
 
 function renderDeletedDiff(relPath, oldBytes, oldFile, config) {
   if (oldFile.binary || isProbablyBinary(oldBytes)) {
     return `Binary file deleted: ${relPath} (${oldBytes.length} bytes)`;
   }
-  return unifiedWholeFileDiff(`checkpoint/${relPath}`, `/dev/null`, bytesToText(oldBytes), '', config);
+  return unifiedLineDiff(`checkpoint/${relPath}`, `/dev/null`, bytesToText(oldBytes), '', config);
 }
 
 function renderChangedDiff(relPath, oldBytes, currentBytes, oldFile, config) {
   if (oldFile.binary || isProbablyBinary(oldBytes) || isProbablyBinary(currentBytes)) {
     return `Binary file changed: ${relPath} (${oldBytes.length} -> ${currentBytes.length} bytes)`;
   }
-  return unifiedWholeFileDiff(`checkpoint/${relPath}`, `workspace/${relPath}`, bytesToText(oldBytes), bytesToText(currentBytes), config);
+  return unifiedLineDiff(`checkpoint/${relPath}`, `workspace/${relPath}`, bytesToText(oldBytes), bytesToText(currentBytes), config);
 }
 
-function unifiedWholeFileDiff(from, to, oldText, newText) {
+function unifiedLineDiff(from, to, oldText, newText, config) {
   if (oldText === newText) {
     return '';
   }
-  const oldLines = splitLines(oldText);
-  const newLines = splitLines(newText);
-  const lines = [
+  const oldLines = splitLinesForPatch(oldText);
+  const newLines = splitLinesForPatch(newText);
+  if (oldLines.length * newLines.length > config.maxTextDiffLinesProduct) {
+    return [
+      `--- ${from}`,
+      `+++ ${to}`,
+      `@@ text diff skipped @@`,
+      `[text diff too large: ${oldLines.length} x ${newLines.length} lines]`
+    ].join('\n');
+  }
+
+  const hunks = buildUnifiedHunks(oldLines, newLines, 3);
+  if (!hunks.length) {
+    return '';
+  }
+  return [
     `--- ${from}`,
     `+++ ${to}`,
-    `@@ -1,${oldLines.length} +1,${newLines.length} @@`
-  ];
-  lines.push(...oldLines.map(line => `-${line}`));
-  lines.push(...newLines.map(line => `+${line}`));
-  return lines.join('\n');
+    ...hunks.flatMap(hunk => [
+      `@@ -${formatRange(hunk.oldStart, hunk.oldCount)} +${formatRange(hunk.newStart, hunk.newCount)} @@`,
+      ...hunk.lines.map(line => `${line.type}${line.text}`)
+    ])
+  ].join('\n');
 }
 
-function splitLines(text) {
+function splitLinesForPatch(text) {
   if (!text) {
     return [];
   }
   return text.replace(/\n$/, '').split(/\r?\n/);
+}
+
+function joinPatchLines(lines) {
+  return lines.length ? `${lines.join('\n')}\n` : '';
+}
+
+function buildUnifiedHunks(oldLines, newLines, context) {
+  const ops = diffLineOps(oldLines, newLines);
+  const changed = [];
+  for (let index = 0; index < ops.length; index += 1) {
+    if (ops[index].type !== 'equal') {
+      changed.push(index);
+    }
+  }
+  if (!changed.length) {
+    return [];
+  }
+
+  const groups = [];
+  let groupStart = changed[0];
+  let groupEnd = changed[0];
+  for (const index of changed.slice(1)) {
+    if (index - groupEnd <= context * 2 + 1) {
+      groupEnd = index;
+    } else {
+      groups.push([groupStart, groupEnd]);
+      groupStart = index;
+      groupEnd = index;
+    }
+  }
+  groups.push([groupStart, groupEnd]);
+
+  return groups.map(([firstChange, lastChange]) => {
+    const start = Math.max(0, firstChange - context);
+    const end = Math.min(ops.length - 1, lastChange + context);
+    const slice = ops.slice(start, end + 1);
+    const first = slice[0];
+    const oldStart = first.oldLine;
+    const newStart = first.newLine;
+    const oldCount = slice.reduce((sum, op) => sum + (op.type === 'insert' ? 0 : 1), 0);
+    const newCount = slice.reduce((sum, op) => sum + (op.type === 'delete' ? 0 : 1), 0);
+    return {
+      oldStart,
+      oldCount,
+      newStart,
+      newCount,
+      lines: slice.map(op => ({
+        type: op.type === 'equal' ? ' ' : op.type === 'delete' ? '-' : '+',
+        text: op.text
+      }))
+    };
+  });
+}
+
+function formatRange(start, count) {
+  return count === 1 ? String(start) : `${start},${count}`;
+}
+
+function diffLineOps(oldLines, newLines) {
+  const oldLength = oldLines.length;
+  const newLength = newLines.length;
+  const table = Array.from({ length: oldLength + 1 }, () => new Uint32Array(newLength + 1));
+
+  for (let oldIndex = oldLength - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLength - 1; newIndex >= 0; newIndex -= 1) {
+      if (oldLines[oldIndex] === newLines[newIndex]) {
+        table[oldIndex][newIndex] = table[oldIndex + 1][newIndex + 1] + 1;
+      } else {
+        table[oldIndex][newIndex] = Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+      }
+    }
+  }
+
+  const ops = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  let oldLine = 1;
+  let newLine = 1;
+  while (oldIndex < oldLength || newIndex < newLength) {
+    if (oldIndex < oldLength && newIndex < newLength && oldLines[oldIndex] === newLines[newIndex]) {
+      ops.push({ type: 'equal', text: oldLines[oldIndex], oldLine, newLine });
+      oldIndex += 1;
+      newIndex += 1;
+      oldLine += 1;
+      newLine += 1;
+    } else if (newIndex < newLength && (oldIndex === oldLength || table[oldIndex][newIndex + 1] > table[oldIndex + 1][newIndex])) {
+      ops.push({ type: 'insert', text: newLines[newIndex], oldLine, newLine });
+      newIndex += 1;
+      newLine += 1;
+    } else {
+      ops.push({ type: 'delete', text: oldLines[oldIndex], oldLine, newLine });
+      oldIndex += 1;
+      oldLine += 1;
+    }
+  }
+  return ops;
+}
+
+function applyReverseLinePatch(baseLines, afterLines, currentLines) {
+  const blocks = buildChangeBlocks(baseLines, afterLines);
+  const patched = [...currentLines];
+  for (const block of blocks.reverse()) {
+    const result = applyReverseBlock(patched, afterLines, block);
+    if (!result.ok) {
+      return result;
+    }
+  }
+  return { ok: true, lines: patched };
+}
+
+function buildChangeBlocks(oldLines, newLines) {
+  const ops = diffLineOps(oldLines, newLines);
+  const blocks = [];
+  for (let index = 0; index < ops.length;) {
+    if (ops[index].type === 'equal') {
+      index += 1;
+      continue;
+    }
+    const first = ops[index];
+    const oldChange = [];
+    const newChange = [];
+    while (index < ops.length && ops[index].type !== 'equal') {
+      if (ops[index].type === 'delete') {
+        oldChange.push(ops[index].text);
+      } else {
+        newChange.push(ops[index].text);
+      }
+      index += 1;
+    }
+    blocks.push({
+      oldStartIndex: first.oldLine - 1,
+      newStartIndex: first.newLine - 1,
+      oldChange,
+      newChange
+    });
+  }
+  return blocks;
+}
+
+function applyReverseBlock(lines, afterLines, block) {
+  if (block.newChange.length > 0) {
+    const index = findSequence(lines, block.newChange, block.newStartIndex);
+    if (index === -1) {
+      return { ok: false, reason: 'overlapping newer edit; reverse patch context was not found.' };
+    }
+    lines.splice(index, block.newChange.length, ...block.oldChange);
+    return { ok: true };
+  }
+
+  const index = findInsertionPoint(lines, afterLines, block.newStartIndex);
+  if (index === -1) {
+    return { ok: false, reason: 'overlapping newer edit; insertion context was not found.' };
+  }
+  lines.splice(index, 0, ...block.oldChange);
+  return { ok: true };
+}
+
+function findSequence(lines, sequence, preferredIndex) {
+  if (!sequence.length) {
+    return Math.max(0, Math.min(preferredIndex, lines.length));
+  }
+  const nearby = findSequenceInRange(lines, sequence, Math.max(0, preferredIndex - 50), Math.min(lines.length, preferredIndex + 50 + sequence.length));
+  if (nearby !== -1) {
+    return nearby;
+  }
+
+  const matches = [];
+  for (let index = 0; index <= lines.length - sequence.length; index += 1) {
+    if (sequenceMatches(lines, sequence, index)) {
+      matches.push(index);
+      if (matches.length > 1) {
+        return -1;
+      }
+    }
+  }
+  return matches[0] ?? -1;
+}
+
+function findSequenceInRange(lines, sequence, start, end) {
+  const max = Math.min(end, lines.length - sequence.length);
+  for (let index = start; index <= max; index += 1) {
+    if (sequenceMatches(lines, sequence, index)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function sequenceMatches(lines, sequence, start) {
+  for (let offset = 0; offset < sequence.length; offset += 1) {
+    if (lines[start + offset] !== sequence[offset]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function findInsertionPoint(lines, afterLines, preferredIndex) {
+  const beforeContext = afterLines.slice(Math.max(0, preferredIndex - 3), preferredIndex);
+  const afterContext = afterLines.slice(preferredIndex, preferredIndex + 3);
+  const matches = [];
+  for (let index = 0; index <= lines.length; index += 1) {
+    if (contextMatchesAt(lines, index, beforeContext, afterContext)) {
+      matches.push(index);
+      if (Math.abs(index - preferredIndex) <= 50) {
+        return index;
+      }
+    }
+  }
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  if (!beforeContext.length && !afterContext.length) {
+    return Math.max(0, Math.min(preferredIndex, lines.length));
+  }
+  return -1;
+}
+
+function contextMatchesAt(lines, index, beforeContext, afterContext) {
+  if (index < beforeContext.length || index + afterContext.length > lines.length) {
+    return false;
+  }
+  const beforeStart = index - beforeContext.length;
+  for (let offset = 0; offset < beforeContext.length; offset += 1) {
+    if (lines[beforeStart + offset] !== beforeContext[offset]) {
+      return false;
+    }
+  }
+  for (let offset = 0; offset < afterContext.length; offset += 1) {
+    if (lines[index + offset] !== afterContext[offset]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function bytesToText(bytes) {
